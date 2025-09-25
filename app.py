@@ -15,7 +15,10 @@ if not os.path.exists(INPUT_DIR):
     os.makedirs(INPUT_DIR)
 
 PROMPT_FILE = "prompts.json"
-MODEL_ID = "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
+MODEL_ID = "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3"
+#MODEL_ID = "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
+
+RESIZE_IMAGE_SIZE = 1280
 
 # Global variables for the model and processor
 model = None
@@ -80,15 +83,8 @@ def load_prompts():
             pass
 
     default_prompts = {
-        "Simple Description" : "in few words, describe this scene content.",
-        "Detailed Description": "Describe this scene in detail.",
-        "custom_1": """You are a specialized scene analysis system. All output must be strictly factual, objective, and devoid of any personal opinions, judgments, or biases.
-Your task is to generate concise and factually descriptive captions for each image provided.
-Captions must be precise, comprehensive, and meticulously aligned with the visual content depicted in the image and any given tags.
-Caption Style: Generate concise captions that are no more than 50 words.
-Focus on combining multiple descriptors into small phrases.
-Follow this structure: "A <subject> doing <action>, they are wearing <clothes>. The background is <background description>. <Additional camera, lighting, or style information>.
-If tags are present, consolidate tags into descriptive phrases where possible, such as "frilled black dress" instead of "dress, frilled dress, black dress"."""
+        "Simple Description" : "Describe this image.",
+        "Detailed Description": "Describe this image, with every single detail.",
     }
     save_prompts(default_prompts)
     return default_prompts
@@ -129,9 +125,13 @@ def read_caption_file(image_path):
     return ""
 
 def generate_caption(image_path, prompt, temperature, seed):
-    """Generates a caption for a single image."""
+    """Génère une légende pour une seule image."""
     try:
         image = Image.open(image_path).convert("RGB")
+        max_size = RESIZE_IMAGE_SIZE
+        if image.width > max_size or image.height > max_size:
+            image.thumbnail((max_size, max_size))
+            print(f"Image {os.path.basename(image_path)} redimensionnée à {image.size}")
         messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
         text_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=[text_prompt], images=[image], return_tensors="pt", truncation=True).to(model.device, dtype=torch.bfloat16)
@@ -151,10 +151,16 @@ def generate_caption(image_path, prompt, temperature, seed):
         generated_ids = model.generate(**inputs, **generation_kwargs)
         generated_ids = [out[len(ins):] for ins, out in zip(inputs.input_ids, generated_ids)]
         response = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        
         return response
+        
     except Exception as e:
         print(f"Error generating caption for {image_path}: {e}")
         return f"Processing Error: {e}"
+    finally:
+        import gc
+        torch.cuda.empty_cache()
+        gc.collect()
 
 def save_caption(image_path, caption):
     """Saves the caption to a .txt file."""
