@@ -1,12 +1,14 @@
-import torch
-from PIL import Image
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+import cv2
 import gradio as gr
+import gc
+import json
 import os
 import shutil
-import zipfile
+import torch
 from functools import partial
-import json
+from PIL import Image
+from src.zip import create_zip_archive
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 
 # --- 1. Configuration ---
 
@@ -14,11 +16,11 @@ INPUT_DIR = "input"
 if not os.path.exists(INPUT_DIR):
     os.makedirs(INPUT_DIR)
 
-PROMPT_FILE = "prompts.json"
+PROMPT_FILE = "./config/prompts.json"
 MODEL_ID = "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3"
 #MODEL_ID = "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
 
-RESIZE_IMAGE_SIZE = 1280
+RESIZE_IMAGE_SIZE = 1100
 
 # Global variables for the model and processor
 model = None
@@ -29,45 +31,7 @@ ITEMS_PER_PAGE = 40  # Number of images to display per page. Adjust as needed.
 ITEMS_PER_ROW = 5    # Number of items per row in the grid.
 
 # --- CSS for styling ---
-CSS = """
-/* Grid Item Styling for consistent height */
-.image-card {
-    display: flex !important;
-    flex-direction: column !important;
-    height: 100%; /* Make card fill the column height */
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    overflow: hidden;
-}
-.image-card .image-container {
-    height: 250px; /* Fixed height for image container */
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background-color: #f5f5f5;
-}
-.image-card .image-container img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover; /* Ensures image covers the area without distortion */
-}
-.image-card textarea {
-    flex-grow: 1; /* Allows the textbox to fill available space */
-    resize: none !important; /* Prevent manual resizing */
-}
-.image-card .action-buttons-row {
-    flex-shrink: 0; /* Prevent button row from shrinking */
-}
-
-/* Locked Item Styling */
-.locked-item { background-color: #f0f0f0; }
-.locked-item .image-container img { filter: grayscale(80%) opacity(0.7); }
-.locked-item textarea { background-color: #e9e9e9 !important; }
-
-/* Action Button Sizing */
-.action-buttons { min-width: 40px !important; max-width: 40px !important; }
-"""
+CSS_PATH = "./src/css/style.css"
 
 
 
@@ -98,16 +62,54 @@ def load_model():
     """Loads the model and processor into VRAM."""
     global model, processor
     if model is None:
-        print("Starting model load... This may take several minutes.")
+        status = "⏳ Loading model... please wait.\n"
+        yield status, False
         try:
             processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, use_fast=False)
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 MODEL_ID, dtype=torch.bfloat16, device_map="auto"
             )
-            print("Model loaded successfully onto the GPU.")
+            status += "✅ Model loaded successfully.\n"
+            yield status, True
         except Exception as e:
-            print(f"CRITICAL ERROR while loading model: {e}")
-            raise
+            status += f"❌ ERROR while loading: {e}\n"
+            yield status, False
+    else:
+        yield "✅ Model already loaded.", True
+
+def unload_model():
+    """Unloads the model and processor from VRAM."""
+    global model, processor
+
+    if model is None:
+        return "⚠️ No model to unload.", False
+
+    status = "♻️ Unloading model...\n"
+    yield status, True
+    try:
+        if model is not None:
+            del model
+            model = None
+        if processor is not None:
+            del processor
+            processor = None
+
+        # clean VRAM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        # clean RAM
+        gc.collect()
+
+        status += "✅ Model unloaded successfully.\n"
+        yield status, False
+    except Exception as e:
+        status += f"❌ ERROR while unloading: {e}\n"
+        yield status, True
+
+def is_model_loaded():
+    return model is not None
 
 def get_image_files():
     """Returns a sorted list of image file paths in the 'input' directory."""
@@ -125,7 +127,7 @@ def read_caption_file(image_path):
     return ""
 
 def generate_caption(image_path, prompt, temperature, seed):
-    """Génère une légende pour une seule image."""
+    """Generate a caption for a given image."""
     try:
         image = Image.open(image_path).convert("RGB")
         max_size = RESIZE_IMAGE_SIZE
@@ -177,7 +179,6 @@ def initialize_app_state():
         status_output: gr.Textbox(value="Loading model into VRAM... Please wait.", interactive=False),
         start_button: gr.Button(interactive=False)
     }
-    load_model()
     yield {
         status_output: gr.Textbox(value="Model ready. You can now generate captions.", interactive=False),
         start_button: gr.Button(interactive=True)
@@ -213,17 +214,6 @@ def handle_upload(files, lock_states):
             lock_states[basename] = False
 
     return lock_states, 1 # Return to page 1 after upload
-
-def create_zip_archive():
-    """Creates a zip archive of the input directory."""
-    zip_path = "input_archive.zip"
-    print("Creating ZIP archive...")
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for root, _, files in os.walk(INPUT_DIR):
-            for file in files:
-                zipf.write(os.path.join(root, file), arcname=file)
-    print(f"Archive created: {zip_path}")
-    return zip_path
 
 def toggle_lock(image_basename, current_states):
     """Toggles the lock state of an image."""
@@ -350,10 +340,12 @@ def add_new_prompt(title, content, prompts_dict):
 
 # --- 4. Create the Gradio Interface ---
 
-with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", css=CSS) as app:
+with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", css_paths=CSS_PATH) as app:
     gr.Markdown("# Image Captioning Tool with Qwen2.5-VL")
     gr.Markdown("Drop your images, adjust the prompt, lock captions you want to keep, then start the process.")
     gr.Markdown("images and captions are stored in ./input folder.")
+
+    is_model_loaded_state = gr.State(is_model_loaded())
 
     lock_states = gr.State({})
     prompts_state = gr.State({})
@@ -363,9 +355,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
         with gr.Column(scale=3):
             file_uploader = gr.File(label="Drop images here", file_count="multiple", file_types=["image"])
         with gr.Column(scale=1):
-             download_zip_button = gr.Button("Download all as .ZIP")
-             status_output = gr.Textbox(label="Status", interactive=False, value="Initializing...", lines=3)
-             download_output = gr.File(label="Download Link", visible=False)
+            download_zip_button = gr.Button("Download all as .ZIP")
+            status_output = gr.Textbox(label="Status", interactive=False, value="Initializing...", lines=3)
+            download_output = gr.File(label="Download Link", visible=False)
+            load_model_button = gr.Button("Load Model", visible=not is_model_loaded())
+            unload_model_button = gr.Button("Unload Model", visible=is_model_loaded())
+
 
     gr.Markdown("### Prompt Configuration")
     with gr.Row(equal_height=True):
@@ -409,12 +404,16 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
                         caption_text = gr.Textbox(show_label=True, interactive=True, lines=4)
                         with gr.Row(elem_classes=["action-buttons-row"]):
                             lock_button = gr.Button("🔓", elem_classes="action-buttons")
+                            # save_button = gr.Button("💾", elem_classes="action-buttons")
                             delete_button = gr.Button("🗑️", elem_classes="action-buttons")
                             single_caption_button = gr.Button("🤖", elem_classes="action-buttons")
                         hidden_filename = gr.Textbox(visible=False)
                         image_components.append({
-                            "col": col, "img": img, "caption": caption_text,
-                            "lock": lock_button, "delete": delete_button,
+                            "col": col,
+                            "img": img,
+                            "caption": caption_text,
+                            "lock": lock_button,
+                            "delete": delete_button,
                             "single_caption": single_caption_button,
                             "hidden_filename": hidden_filename
                         })
@@ -453,7 +452,48 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
         outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
     )
 
-    download_zip_button.click(fn=create_zip_archive, outputs=download_output).then(lambda: gr.File(visible=True), outputs=download_output)
+    download_zip_button.click(
+        fn=partial(create_zip_archive, INPUT_DIR),
+        outputs=download_output
+    ).then(
+        lambda: gr.File(visible=True),
+        outputs=download_output
+    )
+
+    load_model_button.click(
+        fn=load_model,
+        outputs=[status_output, is_model_loaded_state]
+    ).then(
+        lambda loaded: gr.update(
+            visible=not loaded,
+        ),
+        inputs=[is_model_loaded_state],
+        outputs=load_model_button
+    ).then(
+        lambda loaded: gr.update(
+            visible=loaded,
+        ),
+        inputs=[is_model_loaded_state],
+        outputs=unload_model_button
+    )
+
+    unload_model_button.click(
+        fn=unload_model,
+        outputs=[status_output, is_model_loaded_state]
+    ).then(
+        lambda loaded: gr.update(
+            visible=not loaded,
+        ),
+        inputs=[is_model_loaded_state],
+        outputs=load_model_button
+    ).then(
+        lambda loaded: gr.update(
+            visible=loaded,
+        ),
+        inputs=[is_model_loaded_state],
+        outputs=unload_model_button
+    )
+
     prompt_selector.change(fn=update_prompt_from_dropdown, inputs=[prompt_selector, prompts_state], outputs=[prompt_input])
     save_prompt_button.click(
         fn=add_new_prompt, inputs=[new_prompt_title, prompt_input, prompts_state], outputs=[prompts_state, prompt_selector]
@@ -494,7 +534,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
             fn=refresh_gallery_ui, inputs=[lock_states, current_page],
             outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
         )
-        # --- MODIFICATION: Ajout de temp_slider et seed_input aux entrées
+
         comp["single_caption"].click(
             fn=process_single_image, inputs=[comp["hidden_filename"], prompt_input, temp_slider, seed_input], outputs=[comp["caption"]]
         )
