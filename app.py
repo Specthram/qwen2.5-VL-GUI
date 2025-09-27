@@ -13,22 +13,26 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 # --- 1. Configuration ---
 
 INPUT_DIR = "input"
+CONFIG_DIR = "config"
 if not os.path.exists(INPUT_DIR):
     os.makedirs(INPUT_DIR)
+if not os.path.exists(CONFIG_DIR):
+    os.makedirs(CONFIG_DIR)
 
-PROMPT_FILE = "./config/prompts.json"
-MODEL_ID = "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3"
-#MODEL_ID = "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
+PROMPT_FILE = CONFIG_DIR+"/prompts.json"
+MODELS_FILE = CONFIG_DIR+"/models.json"
 
-RESIZE_IMAGE_SIZE = 1100
+
+RESIZE_IMAGE_SIZE = 1024
+FRAMES_TO_EXTRACT_PER_VIDEO = 1 # basically caption the first frame.
 
 # Global variables for the model and processor
 model = None
 processor = None
 
 # --- Gallery Configuration ---
-ITEMS_PER_PAGE = 40  # Number of images to display per page. Adjust as needed.
-ITEMS_PER_ROW = 5    # Number of items per row in the grid.
+ITEMS_PER_PAGE = 40  # Number of images to display per page. Adjust as needed. WARNING : due to bad algo, must be divisible by ITEMS_PER_ROW
+ITEMS_PER_ROW = 4    # Number of items per row in the grid.
 
 # --- CSS for styling ---
 CSS_PATH = "./src/css/style.css"
@@ -53,21 +57,40 @@ def load_prompts():
     save_prompts(default_prompts)
     return default_prompts
 
+def load_or_create_models_config():
+    """Loads model configurations from JSON, or creates a default file."""
+    if os.path.exists(MODELS_FILE):
+        try:
+            with open(MODELS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass # Fallback to creating the default file
+
+    # Default models if the file doesn't exist or is invalid
+    default_models = {
+        "Qwen2.5-VL-7B (NSFW Caption V3)": "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3",
+        "Qwen2.5-VL-7B (Relaxed Captioner)": "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
+    }
+    with open(MODELS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(default_models, f, indent=4, ensure_ascii=False)
+    return default_models
+
+
 def save_prompts(prompts_dict):
     """Saves the prompts dictionary to the JSON file."""
     with open(PROMPT_FILE, 'w', encoding='utf-8') as f:
         json.dump(prompts_dict, f, indent=4, ensure_ascii=False)
 
-def load_model():
-    """Loads the model and processor into VRAM."""
+def load_model(model_id):
+    """Loads the selected model and processor into VRAM."""
     global model, processor
     if model is None:
-        status = "⏳ Loading model... please wait.\n"
+        status = f"⏳ Loading model '{model_id}'... please wait.\n" # <-- MODIFICATION : Affiche le nom du modèle
         yield status, False
         try:
-            processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, use_fast=False)
+            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                MODEL_ID, dtype=torch.bfloat16, device_map="auto"
+                model_id, dtype=torch.bfloat16, device_map="auto"
             )
             status += "✅ Model loaded successfully.\n"
             yield status, True
@@ -108,15 +131,35 @@ def unload_model():
         status += f"❌ ERROR while unloading: {e}\n"
         yield status, True
 
+def on_model_change(is_loaded):
+    """Called when the user selects a different model. Forces unload."""
+    if is_loaded:
+        unload_gen = unload_model()
+        status, loaded_state = "", False
+        for status, loaded_state in unload_gen:
+            pass
+        status += "\nModel selection changed. Please click 'Load Model'."
+        return status, loaded_state
+    return "Model selection changed. Ready to load.", False
+
 def is_model_loaded():
     return model is not None
 
-def get_image_files():
-    """Returns a sorted list of image file paths in the 'input' directory."""
-    supported_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.webp']
+
+def get_media_files():
+    """Returns a sorted list of media file paths in the 'input' directory."""
+    supported_image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.webp']
+    supported_video_extensions = ['.mp4', '.mov', '.avi', '.mkv']
+    supported_extensions = supported_image_extensions + supported_video_extensions
+
     files = [os.path.join(INPUT_DIR, f) for f in os.listdir(INPUT_DIR)
              if os.path.splitext(f)[1].lower() in supported_extensions]
     return sorted(files)
+
+def is_video_file(filename):
+    """Checks if a file is a video based on its extension."""
+    supported_video_extensions = ['.mp4', '.mov', '.avi', '.mkv']
+    return os.path.splitext(filename)[1].lower() in supported_video_extensions
 
 def read_caption_file(image_path):
     """Reads the caption from the corresponding .txt file, if it exists."""
@@ -126,18 +169,66 @@ def read_caption_file(image_path):
             return f.read().strip()
     return ""
 
-def generate_caption(image_path, prompt, temperature, seed):
-    """Generate a caption for a given image."""
+
+def generate_captions_for_video(video_path, prompt, temperature, seed):
+    """Extracts frames from a video, generates a caption for each, and combines them."""
     try:
-        image = Image.open(image_path).convert("RGB")
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return "Error: Could not open video file."
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        if total_frames < FRAMES_TO_EXTRACT_PER_VIDEO:
+            frame_indices = [int(i) for i in range(total_frames)]
+        else:
+            frame_indices = [int(i) for i in torch.linspace(0, total_frames - 1, FRAMES_TO_EXTRACT_PER_VIDEO)]
+
+        combined_caption = ""
+
+        for frame_index in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ret, frame = cap.read()
+            if ret:
+                # Convertir l'image de OpenCV (BGR) en PIL (RGB)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(frame_rgb)
+
+                # Générer la légende pour cette image
+                frame_caption = generate_caption(pil_image, prompt, temperature,
+                                                 seed)  # On passe l'objet image directement
+
+                # Ajouter un horodatage
+                timestamp = frame_index / fps
+                minutes = int(timestamp // 60)
+                seconds = int(timestamp % 60)
+
+                combined_caption += f"[{minutes:02d}:{seconds:02d}] {frame_caption}\n"
+
+        cap.release()
+        return combined_caption.strip()
+
+    except Exception as e:
+        print(f"Error processing video {video_path}: {e}")
+        return f"Video Processing Error: {e}"
+
+
+def generate_caption(image_source, prompt, temperature, seed):  # 'image_path' devient 'image_source'
+    """Generate a caption for a given image (path or PIL object)."""
+    try:
+        if isinstance(image_source, str):
+            image = Image.open(image_source).convert("RGB")
+        else:
+            image = image_source
+
         max_size = RESIZE_IMAGE_SIZE
         if image.width > max_size or image.height > max_size:
             image.thumbnail((max_size, max_size))
-            print(f"Image {os.path.basename(image_path)} redimensionnée à {image.size}")
+
         messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
         text_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=[text_prompt], images=[image], return_tensors="pt", truncation=True).to(model.device, dtype=torch.bfloat16)
-
         generation_kwargs = {
             "max_new_tokens": 1024,
             "do_sample": False,
@@ -146,18 +237,18 @@ def generate_caption(image_path, prompt, temperature, seed):
         if temperature > 0.0:
             generation_kwargs["do_sample"] = True
             generation_kwargs["temperature"] = temperature
-        
+
         if seed != -1 and generation_kwargs["do_sample"]:
             torch.manual_seed(int(seed))
 
         generated_ids = model.generate(**inputs, **generation_kwargs)
         generated_ids = [out[len(ins):] for ins, out in zip(inputs.input_ids, generated_ids)]
         response = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        
+
         return response
-        
+
     except Exception as e:
-        print(f"Error generating caption for {image_path}: {e}")
+        print(f"Error generating caption: {e}")
         return f"Processing Error: {e}"
     finally:
         import gc
@@ -185,29 +276,32 @@ def initialize_app_state():
     }
 
 def process_all_images(prompt, lock_states, temperature, seed, progress=gr.Progress(track_tqdm=True)):
-    """Processes all images in the directory, skipping locked ones."""
-    images = get_image_files()
-    if not images:
-        return "No images found in the 'input' folder.", lock_states
+    """Processes all media in the directory, skipping locked ones."""
+    media_files = get_media_files()
+    if not media_files:
+        return "No media found in the 'input' folder.", lock_states
 
-    unlocked_images = [img for img in images if not lock_states.get(os.path.basename(img), False)]
+    unlocked_media = [mf for mf in media_files if not lock_states.get(os.path.basename(mf), False)]
 
-    if not unlocked_images:
-        return f"Process finished. All {len(images)} images are locked.", lock_states
+    if not unlocked_media:
+        return f"Process finished. All {len(media_files)} media are locked.", lock_states
 
-    print(f"Starting captioning for {len(unlocked_images)} unlocked images with prompt: '{prompt}'")
+    print(f"Starting captioning for {len(unlocked_media)} unlocked media files with prompt: '{prompt}'")
 
-    for image_path in progress.tqdm(unlocked_images, desc="Generating captions..."):
-        caption = generate_caption(image_path, prompt, temperature, seed)
-        save_caption(image_path, caption)
+    for media_path in progress.tqdm(unlocked_media, desc="Generating captions..."):
+        if is_video_file(media_path):
+            caption = generate_captions_for_video(media_path, prompt, temperature, seed)
+        else:
+            caption = generate_caption(media_path, prompt, temperature, seed)
+        save_caption(media_path, caption)
 
-    return f"Process finished! {len(unlocked_images)} new captions generated.", lock_states
+    return f"Process finished! {len(unlocked_media)} new captions generated.", lock_states
 
 def handle_upload(files, lock_states):
     for file_obj in files:
         shutil.copy(file_obj.name, INPUT_DIR)
 
-    image_files = get_image_files()
+    image_files = get_media_files()
     for img_path in image_files:
         basename = os.path.basename(img_path)
         if basename not in lock_states:
@@ -266,42 +360,58 @@ def delete_all_unlocked_images(lock_states):
 def process_single_image(image_basename, prompt, temperature, seed):
     """Generates a caption for a single image and updates its text field."""
     print(f"Generating single caption for {image_basename}...")
-    image_path = os.path.join(INPUT_DIR, image_basename)
-    caption = generate_caption(image_path, prompt, temperature, seed)
-    save_caption(image_path, caption)
+    media_path = os.path.join(INPUT_DIR, image_basename)
+    if is_video_file(media_path):
+        # Si c'est une vidéo, on appelle la fonction de traitement vidéo
+        caption = generate_captions_for_video(media_path, prompt, temperature, seed)
+    else:
+        # Sinon, c'est une image, on utilise la fonction originale
+        caption = generate_caption(media_path, prompt, temperature, seed)
+
+    # La sauvegarde et le retour du résultat ne changent pas
+    save_caption(media_path, caption)
     return caption
+
+def save_caption_from_ui(image_basename, new_caption):
+    if image_basename:
+        media_path = os.path.join(INPUT_DIR, image_basename)
+        save_caption(media_path, new_caption)
+        print(f"Caption for {image_basename} updated via UI edit.")
 
 def refresh_gallery_ui(lock_states, page_num=1):
     """Refreshes the gallery UI for a given page."""
-    image_files = get_image_files()
-    total_images = len(image_files)
-    total_pages = (total_images + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE if total_images > 0 else 1
+    media_files = get_media_files()  # Renommé
+    total_media = len(media_files)
+    total_pages = (total_media + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE if total_media > 0 else 1
     page_num = max(1, min(page_num, total_pages))
 
     start_index = (page_num - 1) * ITEMS_PER_PAGE
     end_index = start_index + ITEMS_PER_PAGE
-    page_image_files = image_files[start_index:end_index]
+    page_media_files = media_files[start_index:end_index]
 
-    for img_path in image_files:
-        basename = os.path.basename(img_path)
+    for media_path in media_files:
+        basename = os.path.basename(media_path)
         if basename not in lock_states:
             lock_states[basename] = False
 
     ui_updates = []
     for i in range(ITEMS_PER_PAGE):
-        if i < len(page_image_files):
-            img_path = page_image_files[i]
-            basename = os.path.basename(img_path)
-            caption = read_caption_file(img_path)
+        if i < len(page_media_files):
+            media_path = page_media_files[i]
+            basename = os.path.basename(media_path)
+            caption = read_caption_file(media_path)
             is_locked = lock_states.get(basename, False)
+            is_vid = is_video_file(media_path)
 
             column_classes = ["image-card"]
             if is_locked:
                 column_classes.append("locked-item")
 
+            # Ici, on choisit d'afficher l'image OU la vidéo
             ui_updates.extend([
                 gr.Column(visible=True, elem_classes=column_classes),
-                gr.Image(value=img_path, visible=True),
+                gr.Image(value=media_path if not is_vid else None, visible=not is_vid),
+                gr.Video(value=media_path if is_vid else None, visible=is_vid),
                 gr.Textbox(value=caption, label=basename, interactive=not is_locked, visible=True),
                 gr.Button(value="🔒" if is_locked else "🔓", visible=True),
                 gr.Button(visible=True),
@@ -309,13 +419,15 @@ def refresh_gallery_ui(lock_states, page_num=1):
                 gr.Textbox(value=basename, visible=False)
             ])
         else:
-            ui_updates.extend([gr.Column(visible=False)] + [gr.update(visible=False)] * 6)
+            # S'assurer de cacher les 8 composants
+            ui_updates.extend([gr.Column(visible=False)] + [gr.update(visible=False)] * 7)
 
-    page_info = f"Page {page_num} / {total_pages} ({total_images} images)"
+    page_info = f"Page {page_num} / {total_pages} ({total_media} media)"
     prev_button_interactive = page_num > 1
     next_button_interactive = page_num < total_pages
 
-    return [lock_states, page_num, page_info, gr.Button(interactive=prev_button_interactive), gr.Button(interactive=next_button_interactive)] + ui_updates
+    return [lock_states, page_num, page_info, gr.Button(interactive=prev_button_interactive),
+            gr.Button(interactive=next_button_interactive)] + ui_updates
 
 def load_and_refresh_prompts():
     """Loads prompts from file and updates the dropdown menu."""
@@ -338,6 +450,13 @@ def add_new_prompt(title, content, prompts_dict):
 
     return prompts_dict, gr.Dropdown(choices=list(prompts_dict.keys()), value=title)
 
+def load_model_wrapper(selected_name, models_dict):
+    model_id = models_dict.get(selected_name)
+    if not model_id:
+        yield "Erreur : Nom du modèle non trouvé dans la configuration.", False
+        return
+    yield from load_model(model_id)
+
 # --- 4. Create the Gradio Interface ---
 
 with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", css_paths=CSS_PATH) as app:
@@ -346,6 +465,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
     gr.Markdown("images and captions are stored in ./input folder.")
 
     is_model_loaded_state = gr.State(is_model_loaded())
+    models_state = gr.State({})
 
     lock_states = gr.State({})
     prompts_state = gr.State({})
@@ -353,13 +473,14 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
 
     with gr.Row():
         with gr.Column(scale=3):
-            file_uploader = gr.File(label="Drop images here", file_count="multiple", file_types=["image"])
+            file_uploader = gr.File(label="Drop images or videos here", file_count="multiple", file_types=["image", "video"])
         with gr.Column(scale=1):
-            download_zip_button = gr.Button("Download all as .ZIP")
-            status_output = gr.Textbox(label="Status", interactive=False, value="Initializing...", lines=3)
-            download_output = gr.File(label="Download Link", visible=False)
+            model_selector = gr.Dropdown(label="Select Model", interactive=True)
             load_model_button = gr.Button("Load Model", visible=not is_model_loaded())
             unload_model_button = gr.Button("Unload Model", visible=is_model_loaded())
+            status_output = gr.Textbox(label="Status", interactive=False, value="Initializing...", lines=3)
+            download_zip_button = gr.Button("Download all as .ZIP")
+            download_output = gr.File(label="Download Link", visible=False)
 
 
     gr.Markdown("### Prompt Configuration")
@@ -400,7 +521,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
                 for j in range(ITEMS_PER_ROW):
                     with gr.Column(visible=False, scale=1, elem_classes=["image-card"]) as col:
                         with gr.Group(elem_classes=["image-container"]):
-                            img = gr.Image(show_label=False, type="filepath", show_download_button=False)
+                            img = gr.Image(show_label=False, type="filepath", show_download_button=False, visible=False)
+                            vid = gr.Video(show_label=False, show_download_button=False, visible=False)
                         caption_text = gr.Textbox(show_label=True, interactive=True, lines=4)
                         with gr.Row(elem_classes=["action-buttons-row"]):
                             lock_button = gr.Button("🔓", elem_classes="action-buttons")
@@ -411,6 +533,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
                         image_components.append({
                             "col": col,
                             "img": img,
+                            "vid": vid,
                             "caption": caption_text,
                             "lock": lock_button,
                             "delete": delete_button,
@@ -421,7 +544,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
     # --- 5. Connect Events ---
     flat_ui_outputs = []
     for comp in image_components:
-        flat_ui_outputs.extend([comp["col"], comp["img"], comp["caption"], comp["lock"], comp["delete"], comp["single_caption"], comp["hidden_filename"]])
+        flat_ui_outputs.extend([comp["col"], comp["img"], comp["vid"], comp["caption"], comp["lock"], comp["delete"], comp["single_caption"], comp["hidden_filename"]])
 
     app.load(
         fn=load_and_refresh_prompts,
@@ -430,7 +553,14 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
         fn=refresh_gallery_ui,
         inputs=[lock_states, current_page],
         outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
-    )
+    ).then(
+    fn=load_or_create_models_config,
+    outputs=[models_state]
+    ).then(
+    fn=lambda models_dict: gr.Dropdown(choices=list(models_dict.keys()), value=list(models_dict.keys())[0]),
+    inputs=[models_state],
+    outputs=[model_selector]
+)
 
     app.load(
         fn=initialize_app_state,
@@ -461,18 +591,15 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
     )
 
     load_model_button.click(
-        fn=load_model,
+        fn=load_model_wrapper,
+        inputs=[model_selector, models_state],
         outputs=[status_output, is_model_loaded_state]
     ).then(
-        lambda loaded: gr.update(
-            visible=not loaded,
-        ),
+        lambda loaded: gr.update(visible=not loaded),
         inputs=[is_model_loaded_state],
         outputs=load_model_button
     ).then(
-        lambda loaded: gr.update(
-            visible=loaded,
-        ),
+        lambda loaded: gr.update(visible=loaded),
         inputs=[is_model_loaded_state],
         outputs=unload_model_button
     )
@@ -490,6 +617,20 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
         lambda loaded: gr.update(
             visible=loaded,
         ),
+        inputs=[is_model_loaded_state],
+        outputs=unload_model_button
+    )
+
+    model_selector.change(
+        fn=on_model_change,
+        inputs=[is_model_loaded_state],
+        outputs=[status_output, is_model_loaded_state]
+    ).then(
+        lambda loaded: gr.update(visible=not loaded),
+        inputs=[is_model_loaded_state],
+        outputs=load_model_button
+    ).then(
+        lambda loaded: gr.update(visible=loaded),
         inputs=[is_model_loaded_state],
         outputs=unload_model_button
     )
@@ -537,6 +678,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
 
         comp["single_caption"].click(
             fn=process_single_image, inputs=[comp["hidden_filename"], prompt_input, temp_slider, seed_input], outputs=[comp["caption"]]
+        )
+
+        comp["caption"].blur(
+            fn=save_caption_from_ui,
+            inputs=[comp["hidden_filename"], comp["caption"]],
+            outputs=None
         )
 
 # --- 6. Launch the App ---

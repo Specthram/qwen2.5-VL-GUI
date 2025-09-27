@@ -1,3 +1,7 @@
 /venv
 /input
 prompts.json
+/.idea
+collection.zip
+/config/
+/src/__*
