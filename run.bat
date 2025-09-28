@@ -37,7 +37,7 @@ if not exist ".\venv\Scripts\activate.bat" (
     pip install git+https://github.com/huggingface/transformers.git
 
     REM --- Installing other libraries ---
-    pip install gradio accelerate bitsandbytes sentencepiece
+    pip install gradio accelerate bitsandbytes sentencepiece opencv-python
     
     echo.
     echo Installation complete!

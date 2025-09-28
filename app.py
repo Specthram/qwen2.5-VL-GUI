@@ -341,10 +341,10 @@ def delete_file_pair(image_basename):
         os.remove(txt_path)
         print(f"Caption deleted: {txt_path}")
 
-def delete_all_unlocked_images(lock_states):
+def delete_all_images(lock_states):
     """Deletes all images and their captions that are not locked."""
     images_to_delete = [
-        os.path.basename(img) for img in get_image_files()
+        os.path.basename(img) for img in get_media_files()
         if not lock_states.get(os.path.basename(img), False)
     ]
     
@@ -439,7 +439,7 @@ def update_prompt_from_dropdown(selected_title, prompts_dict):
     """Updates the prompt text field from the dropdown selection."""
     return prompts_dict.get(selected_title, "")
 
-def add_new_prompt(title, content, prompts_dict):
+def add_new_prompt(title, content, prompts_dict, prompts=None):
     """Adds a new prompt, saves it, and updates the UI."""
     if not title or not content:
         current_selection = list(prompts_dict.keys())[0] if prompts else ""
@@ -657,7 +657,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", cs
     delete_all_button.click(fn=lambda: gr.Group(visible=True), outputs=[confirmation_group])
     cancel_delete_button.click(fn=lambda: gr.Group(visible=False), outputs=[confirmation_group])
     confirm_delete_button.click(
-        fn=delete_all_unlocked_images, inputs=[lock_states], outputs=[status_output, confirmation_group]
+        fn=delete_all_images, inputs=[lock_states], outputs=[status_output, confirmation_group]
     ).then(
         fn=refresh_gallery_ui, inputs=[lock_states, current_page],
         outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
