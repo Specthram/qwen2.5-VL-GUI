@@ -459,8 +459,8 @@ def load_model_wrapper(selected_name, models_dict):
 
 # --- 4. Create the Gradio Interface ---
 
-with gr.Blocks(theme=gr.themes.Soft(), title="Image Captioning with Qwen-VL", css_paths=CSS_PATH) as app:
-    gr.Markdown("# Image Captioning Tool with Qwen2.5-VL")
+with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH) as app:
+    gr.Markdown("# Caption Forge")
     gr.Markdown("Drop your images, adjust the prompt, lock captions you want to keep, then start the process.")
     gr.Markdown("images and captions are stored in ./input folder.")
 
