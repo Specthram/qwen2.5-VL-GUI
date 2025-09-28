@@ -88,5 +88,4 @@ The feature I see in the future :
 
 ### Feel free to suggest a feature.
 
-
-<img width="1511" height="993" alt="image" src="https://github.com/user-attachments/assets/b8030af4-57d5-4ae7-b667-189ae7b5a44f" />
+<img width="1418" height="1277" alt="image" src="https://github.com/user-attachments/assets/d907cc52-de85-463b-a4ed-9b66d4bf49e2" />
