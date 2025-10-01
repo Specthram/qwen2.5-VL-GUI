@@ -85,8 +85,10 @@ The feature I see in the future :
 - dataset deploying, creating symlinks in your ai_toolkit/kohya/whatever folder to avoid duplication
 - dynamic dataset creation, using sqlite or something like that, to create and store theses datasets virtualy before deploy
 - automatic image renaming - avoid the error of `image1.png` and `image1.jpg` overwriting same `image1.txt` file
+- word finder/replacer
 
 ### Feel free to suggest a feature.
 
+<img width="1249" height="1283" alt="image" src="https://github.com/user-attachments/assets/d24ef4b6-ef5d-4ef9-957f-58197cf34502" />
 
-<img width="1511" height="993" alt="image" src="https://github.com/user-attachments/assets/b8030af4-57d5-4ae7-b667-189ae7b5a44f" />
+

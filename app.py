@@ -68,8 +68,9 @@ def load_or_create_models_config():
 
     # Default models if the file doesn't exist or is invalid
     default_models = {
-        "Qwen2.5-VL-7B (NSFW Caption V3)": "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3",
-        "Qwen2.5-VL-7B (Relaxed Captioner)": "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed"
+        "Qwen2.5-VL-7B": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "Qwen2.5-VL-7B (Relaxed Captioner)": "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed",
+        "Qwen2.5-VL-7B (NSFW Caption V3)": "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3"
     }
     with open(MODELS_FILE, 'w', encoding='utf-8') as f:
         json.dump(default_models, f, indent=4, ensure_ascii=False)
