@@ -24,7 +24,7 @@ MODELS_FILE = CONFIG_DIR+"/models.json"
 
 
 RESIZE_IMAGE_SIZE = 1024
-FRAMES_TO_EXTRACT_PER_VIDEO = 1 # basically caption the first frame.
+FRAMES_TO_EXTRACT_PER_VIDEO = 1 # basically caption the first frame.more = one caption per frame.
 
 # Global variables for the model and processor
 model = None
@@ -192,15 +192,11 @@ def generate_captions_for_video(video_path, prompt, temperature, seed):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ret, frame = cap.read()
             if ret:
-                # Convertir l'image de OpenCV (BGR) en PIL (RGB)
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_image = Image.fromarray(frame_rgb)
 
-                # Générer la légende pour cette image
-                frame_caption = generate_caption(pil_image, prompt, temperature,
-                                                 seed)  # On passe l'objet image directement
+                frame_caption = generate_caption(pil_image, prompt, temperature, seed)
 
-                # Ajouter un horodatage
                 timestamp = frame_index / fps
                 minutes = int(timestamp // 60)
                 seconds = int(timestamp % 60)
@@ -363,13 +359,10 @@ def process_single_image(image_basename, prompt, temperature, seed):
     print(f"Generating single caption for {image_basename}...")
     media_path = os.path.join(INPUT_DIR, image_basename)
     if is_video_file(media_path):
-        # Si c'est une vidéo, on appelle la fonction de traitement vidéo
         caption = generate_captions_for_video(media_path, prompt, temperature, seed)
     else:
-        # Sinon, c'est une image, on utilise la fonction originale
         caption = generate_caption(media_path, prompt, temperature, seed)
 
-    # La sauvegarde et le retour du résultat ne changent pas
     save_caption(media_path, caption)
     return caption
 
@@ -408,7 +401,6 @@ def refresh_gallery_ui(lock_states, page_num=1):
             if is_locked:
                 column_classes.append("locked-item")
 
-            # Ici, on choisit d'afficher l'image OU la vidéo
             ui_updates.extend([
                 gr.Column(visible=True, elem_classes=column_classes),
                 gr.Image(value=media_path if not is_vid else None, visible=not is_vid),
@@ -420,7 +412,6 @@ def refresh_gallery_ui(lock_states, page_num=1):
                 gr.Textbox(value=basename, visible=False)
             ])
         else:
-            # S'assurer de cacher les 8 composants
             ui_updates.extend([gr.Column(visible=False)] + [gr.update(visible=False)] * 7)
 
     page_info = f"Page {page_num} / {total_pages} ({total_media} media)"
@@ -575,7 +566,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
         outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
     )
 
-    # --- MODIFICATION: Ajout de temp_slider et seed_input aux entrées
     start_button.click(
         fn=process_all_images, inputs=[prompt_input, lock_states, temp_slider, seed_input], outputs=[status_output, lock_states]
     ).then(
