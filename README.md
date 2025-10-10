@@ -1,6 +1,6 @@
 # Caption Forge
 
-A local based captioning tool with graphic interface (gradio), using Qwen2.5-VL models.
+A local based captioning tool with GUI.
 
 *__🚧 Early stage project – the code is messy, experimental and under heavy development.  
 Don’t expect clean architecture (yet)!__*
