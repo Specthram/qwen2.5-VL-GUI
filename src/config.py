@@ -24,11 +24,6 @@ def load_or_create_models_config():
             "type": "qwen2.5",
             "default": True
         },
-        "Qwen2.5-VL-7B": {
-            "model": "Qwen/Qwen2.5-VL-7B-Instruct",
-            "type": "qwen2.5",
-            "default": False
-        },
         "Qwen2.5-VL-32B-Instruct": {
             "model": "unsloth/Qwen2.5-VL-32B-Instruct",
             "type": "qwen2.5",
@@ -39,7 +34,7 @@ def load_or_create_models_config():
             "type": "qwen2.5",
             "default": False
         },
-        "llama-joycaption-beta-one-hf-llava": {
+        "JoyCaption Beta One": {
             "model": "fancyfeast/llama-joycaption-beta-one-hf-llava",
             "type": "llava",
             "default": False
@@ -59,9 +54,21 @@ def load_prompts():
             pass
 
     default_prompts = {
-        "Simple Description" : "Describe this image.",
-        "Detailed Description": "Describe this image, with every single detail.",
-        "llama - Descriptive": "Write a long descriptive caption for this image in a formal tone."
+        "Simple Description" : {
+            "prompt": "Describe this image.",
+            "type": "qwen2.5",
+            "default": False
+        },
+        "Detailed Description": {
+            "prompt": "Describe this image, with every single detail.",
+            "type": "qwen2.5",
+            "default": True
+        },
+        "llama - Descriptive": {
+            "prompt": "Write a long descriptive caption for this image in a formal tone.",
+            "type": "llava",
+            "default": True
+        }
     }
     save_prompts(default_prompts)
     return default_prompts

@@ -458,30 +458,62 @@ def refresh_gallery_ui(lock_states, page_num=1):
     return [lock_states, page_num, page_info, gr.Button(interactive=prev_button_interactive),
             gr.Button(interactive=next_button_interactive)] + ui_updates
 
-def load_and_refresh_prompts():
+def load_and_refresh_prompts(selected_model_id = None, models_dict = None):
     """Loads prompts from file and updates the dropdown menu."""
     prompts = load_prompts()
-    default_prompt_title = list(prompts.keys())[0] if prompts else ""
-    return prompts, gr.Dropdown(choices=list(prompts.keys()), value=default_prompt_title), prompts.get(default_prompt_title, "")
+
+    if selected_model_id is not None and models_dict is not None:
+        type = models_dict.get(selected_model_id)["type"]
+        filtered_prompts = {k: v for k, v in prompts.items() if v.get("type") == type}
+    else:
+        filtered_prompts = prompts
+
+    if not filtered_prompts:
+        return {}, gr.Dropdown(choices=[], value=""), ""
+
+    default_prompt_title = next((k for k, v in filtered_prompts.items() if v.get("default")), None)
+
+    if not default_prompt_title:
+        default_prompt_title = list(filtered_prompts.keys())[0]
+
+    default_prompt_text = filtered_prompts[default_prompt_title].get("prompt", "")
+
+    return (
+        filtered_prompts,
+        gr.Dropdown(choices=list(filtered_prompts.keys()), value=default_prompt_title),
+        default_prompt_text
+    )
 
 def update_prompt_from_dropdown(selected_title, prompts_dict):
     """Updates the prompt text field from the dropdown selection."""
-    return prompts_dict.get(selected_title, "")
+    return prompts_dict.get(selected_title, "").get("prompt", "")
 
-def add_new_prompt(title, content, prompts_dict, prompts=None):
+def add_new_prompt(title, prompt, prompts_dict, selected_model_id, models_dict):
     """Adds a new prompt, saves it, and updates the UI."""
-    if not title or not content:
-        current_selection = list(prompts_dict.keys())[0] if prompts else ""
-        return prompts_dict, gr.Dropdown(choices=list(prompts.keys()), value=current_selection)
+    if not title or not prompt:
+        current_selection = list(prompts_dict.keys())[0] if prompts_dict else ""
+        return prompts_dict, gr.Dropdown(choices=list(prompts_dict.keys()), value=current_selection)
 
-    prompts_dict[title] = content
-    save_prompts(prompts_dict)
+    all_prompts = load_prompts()
+
+    type = models_dict.get(selected_model_id)["type"]
+    new_prompt_entry = {
+        "prompt": prompt,
+        "type": type,
+        "default": False
+    }
+
+    prompts_dict[title] = new_prompt_entry
+    all_prompts[title] = new_prompt_entry
+
+    save_prompts(all_prompts)
 
     return prompts_dict, gr.Dropdown(choices=list(prompts_dict.keys()), value=title)
 
 def load_model_wrapper(selected_model_id, models_dict):
     model_id = models_dict.get(selected_model_id)['model']
     model_type = models_dict.get(selected_model_id)['type']
+
     if not model_id:
         yield "Erreur : Nom du modèle non trouvé dans la configuration.", False
         return
@@ -489,7 +521,7 @@ def load_model_wrapper(selected_model_id, models_dict):
 
 # --- 4. Create the Gradio Interface ---
 
-with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH) as app:
+with (gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH) as app):
     gr.Markdown("# Caption Forge")
     gr.Markdown("Drop your images, adjust the prompt, lock captions you want to keep, then start the process.")
     gr.Markdown("images and captions are stored in ./input folder.")
@@ -658,6 +690,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
         inputs=[is_model_loaded_state],
         outputs=[status_output, is_model_loaded_state]
     ).then(
+        fn=load_and_refresh_prompts,
+        inputs=[model_selector, models_state],
+        outputs=[prompts_state, prompt_selector, prompt_input]
+    ).then(
         lambda loaded: gr.update(visible=not loaded),
         inputs=[is_model_loaded_state],
         outputs=load_model_button
@@ -669,8 +705,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
 
     prompt_selector.change(fn=update_prompt_from_dropdown, inputs=[prompt_selector, prompts_state], outputs=[prompt_input])
     save_prompt_button.click(
-        fn=add_new_prompt, inputs=[new_prompt_title, prompt_input, prompts_state], outputs=[prompts_state, prompt_selector]
-    ).then(lambda: gr.Textbox(value=""), outputs=new_prompt_title)
+        fn=add_new_prompt,
+        inputs=[new_prompt_title, prompt_input, prompts_state, model_selector, models_state],
+        outputs=[prompts_state, prompt_selector]
+    ).then(
+        lambda: gr.Textbox(value=""),
+        outputs=new_prompt_title
+    )
 
     prev_button.click(
         fn=lambda p: p - 1, inputs=[current_page], outputs=[current_page]

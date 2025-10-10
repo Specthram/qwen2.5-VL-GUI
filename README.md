@@ -19,7 +19,15 @@ Don’t expect clean architecture (yet)!__*
 - temperature / seed settings
 - download a zip archive of your captioned dataset
 
-## What happen behind the scene ?
+## Supported Models Types
+
+At the moment, there is two kind of models caption-forge is compatible.
+- Qwen2.5-Vl
+- Llava (joycaption)
+
+you can edit the models.json file to add your own qwen2.5-llava models.
+
+## What happens behind the scenes ?
 
 the first time you caption, the model is downloaded from huggingface.
 the pictures you upload are placed in an input folder. captions are saved in a .txt with the same name of your picture.
@@ -49,11 +57,9 @@ python -m venv venv
 
 .\venv\Scripts\activate
 
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
 
-pip install git+https://github.com/huggingface/transformers.git
-
-pip install gradio accelerate bitsandbytes sentencepiece opencv-python
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 python app.py
 ```
