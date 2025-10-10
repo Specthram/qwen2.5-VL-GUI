@@ -1,0 +1,7 @@
+transformers
+gradio
+accelerate
+bitsandbytes
+sentencepiece
+opencv-python
+protobuf

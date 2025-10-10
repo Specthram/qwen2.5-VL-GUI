@@ -27,17 +27,11 @@ if not exist ".\venv\Scripts\activate.bat" (
 
     echo.
     echo Installing dependencies. This step may take several minutes...
-    
-    REM --- Installing PyTorch for CUDA 12.8 (or adjust as needed) ---
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-    
-    REM --- Installing the latest version of transformers ---
-    echo.
-    echo Installing the latest version of Transformers from GitHub...
-    pip install git+https://github.com/huggingface/transformers.git
+    echo Installing dependencies from requirements.txt...
+    pip install -r requirements.txt
 
-    REM --- Installing other libraries ---
-    pip install gradio accelerate bitsandbytes sentencepiece opencv-python
+    pip install torch --index-url https://download.pytorch.org/whl/cu128
+    pip install torchvision --index-url https://download.pytorch.org/whl/cu128
     
     echo.
     echo Installation complete!

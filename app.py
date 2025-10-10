@@ -1,32 +1,33 @@
 import cv2
 import gradio as gr
 import gc
-import json
 import os
 import shutil
 import torch
+import torchvision.transforms.functional as TVF
+from torchvision.transforms import ToTensor, ToPILImage
+import torch.nn.functional as F
 from functools import partial
 from PIL import Image
+from PIL.Image import Resampling
 from src.zip import create_zip_archive
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, Gemma3ForConditionalGeneration, \
+    LlavaForConditionalGeneration
+from src.config import save_prompts, load_or_create_models_config, load_prompts, save_models
 
 # --- 1. Configuration ---
 
 INPUT_DIR = "input"
-CONFIG_DIR = "config"
+
 if not os.path.exists(INPUT_DIR):
     os.makedirs(INPUT_DIR)
-if not os.path.exists(CONFIG_DIR):
-    os.makedirs(CONFIG_DIR)
-
-PROMPT_FILE = CONFIG_DIR+"/prompts.json"
-MODELS_FILE = CONFIG_DIR+"/models.json"
 
 
 RESIZE_IMAGE_SIZE = 1024
 FRAMES_TO_EXTRACT_PER_VIDEO = 1 # basically caption the first frame.more = one caption per frame.
 
 # Global variables for the model and processor
+current_model_type = None
 model = None
 processor = None
 
@@ -41,58 +42,32 @@ CSS_PATH = "./src/css/style.css"
 
 # --- 2. Core Functions ---
 
-def load_prompts():
-    """Loads prompts from the JSON file, or creates a default file."""
-    if os.path.exists(PROMPT_FILE):
-        try:
-            with open(PROMPT_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            pass
-
-    default_prompts = {
-        "Simple Description" : "Describe this image.",
-        "Detailed Description": "Describe this image, with every single detail.",
-    }
-    save_prompts(default_prompts)
-    return default_prompts
-
-def load_or_create_models_config():
-    """Loads model configurations from JSON, or creates a default file."""
-    if os.path.exists(MODELS_FILE):
-        try:
-            with open(MODELS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            pass # Fallback to creating the default file
-
-    # Default models if the file doesn't exist or is invalid
-    default_models = {
-        "Qwen2.5-VL-7B": "Qwen/Qwen2.5-VL-7B-Instruct",
-        "Qwen2.5-VL-7B (Relaxed Captioner)": "Ertugrul/Qwen2.5-VL-7B-Captioner-Relaxed",
-        "Qwen2.5-VL-7B (NSFW Caption V3)": "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3"
-    }
-    with open(MODELS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(default_models, f, indent=4, ensure_ascii=False)
-    return default_models
-
-
-def save_prompts(prompts_dict):
-    """Saves the prompts dictionary to the JSON file."""
-    with open(PROMPT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(prompts_dict, f, indent=4, ensure_ascii=False)
-
-def load_model(model_id):
+def load_model(model_id: str, model_type: str):
     """Loads the selected model and processor into VRAM."""
-    global model, processor
+    global model, processor, current_model_type
     if model is None:
         status = f"⏳ Loading model '{model_id}'... please wait.\n" # <-- MODIFICATION : Affiche le nom du modèle
         yield status, False
         try:
-            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_id, dtype=torch.bfloat16, device_map="auto"
-            )
+            if model_type == 'qwen2.5':
+                current_model_type = model_type
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
+                model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    model_id, dtype=torch.bfloat16, device_map="auto"
+                )
+            elif model_type == 'gemma3':
+                current_model_type = model_type
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
+                model = Gemma3ForConditionalGeneration.from_pretrained(
+                    model_id, dtype=torch.bfloat16, device_map="auto"
+                )
+            elif model_type == 'llava':
+                current_model_type = model_type
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, use_fast=True)
+                model = LlavaForConditionalGeneration.from_pretrained(
+                    model_id, dtype=torch.bfloat16, device_map="auto"
+                )
+
             status += "✅ Model loaded successfully.\n"
             yield status, True
         except Exception as e:
@@ -143,9 +118,21 @@ def on_model_change(is_loaded):
         return status, loaded_state
     return "Model selection changed. Ready to load.", False
 
+def persist_last_model_choice(selected_model_id, models_dict):
+    """Save the last model choice in conf."""
+    model_id = models_dict.get(selected_model_id)['model']
+    model_type = models_dict.get(selected_model_id)['type']
+
+    for k, v in models_dict.items():
+        if k == selected_model_id:
+            v["default"] = True
+        else:
+            v["default"] = False
+
+    save_models(models_dict)
+
 def is_model_loaded():
     return model is not None
-
 
 def get_media_files():
     """Returns a sorted list of media file paths in the 'input' directory."""
@@ -210,8 +197,13 @@ def generate_captions_for_video(video_path, prompt, temperature, seed):
         print(f"Error processing video {video_path}: {e}")
         return f"Video Processing Error: {e}"
 
+def resize_with_aspect_ratio(img, max_size=1024):
+    w, h = img.size
+    scale = max_size / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-def generate_caption(image_source, prompt, temperature, seed):  # 'image_path' devient 'image_source'
+def generate_caption(image_source, prompt, temperature, seed):
     """Generate a caption for a given image (path or PIL object)."""
     try:
         if isinstance(image_source, str):
@@ -221,26 +213,82 @@ def generate_caption(image_source, prompt, temperature, seed):  # 'image_path' d
 
         max_size = RESIZE_IMAGE_SIZE
         if image.width > max_size or image.height > max_size:
-            image.thumbnail((max_size, max_size))
+            image = resize_with_aspect_ratio(image)
 
-        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
-        text_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = processor(text=[text_prompt], images=[image], return_tensors="pt", truncation=True).to(model.device, dtype=torch.bfloat16)
-        generation_kwargs = {
-            "max_new_tokens": 1024,
-            "do_sample": False,
-        }
+        if current_model_type == "llava":
+            pixel_values = list(image.getdata())
 
-        if temperature > 0.0:
-            generation_kwargs["do_sample"] = True
-            generation_kwargs["temperature"] = temperature
 
-        if seed != -1 and generation_kwargs["do_sample"]:
-            torch.manual_seed(int(seed))
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful image captioner.",
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ]
 
-        generated_ids = model.generate(**inputs, **generation_kwargs)
-        generated_ids = [out[len(ins):] for ins, out in zip(inputs.input_ids, generated_ids)]
-        response = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            text_prompt = processor.apply_chat_template(messages, tokenize = False, add_generation_prompt = True)
+            inputs = processor(text=[text_prompt], images=[image], return_tensors="pt", resample=Image.BICUBIC).to('cuda')
+            inputs['pixel_values'] = inputs['pixel_values'].to(torch.bfloat16)
+
+            generate_ids = model.generate(
+                **inputs,
+                max_new_tokens=1024,
+                do_sample=True,
+                suppress_tokens=None,
+                use_cache=True,
+                temperature=temperature,
+                top_k=None,
+                top_p=0.9,
+            )[0]
+
+            # Trim off the prompt
+            generate_ids = generate_ids[inputs['input_ids'].shape[1]:]
+
+            # Decode the caption
+            caption = processor.tokenizer.decode(
+                generate_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+            response = caption.strip()
+        else:
+            messages = [
+                {
+                    "role": "user",
+                    "content":
+                        [
+                            {
+                                "type": "image"
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                }
+            ]
+            text_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = processor(text=[text_prompt], images=[image], return_tensors="pt", truncation=True).to(model.device, dtype=torch.bfloat16)
+
+            generation_kwargs = {
+                "max_new_tokens": 1024,
+                "do_sample": False,
+            }
+
+            if temperature > 0.0:
+                generation_kwargs["do_sample"] = True
+                generation_kwargs["temperature"] = temperature
+
+            if seed != -1 and generation_kwargs["do_sample"]:
+                torch.manual_seed(int(seed))
+
+            generated_ids = model.generate(**inputs, **generation_kwargs)
+            generated_ids = [out[len(ins):] for ins, out in zip(inputs.input_ids, generated_ids)]
+            response = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 
         return response
 
@@ -344,7 +392,7 @@ def delete_all_images(lock_states):
         os.path.basename(img) for img in get_media_files()
         if not lock_states.get(os.path.basename(img), False)
     ]
-    
+
     if not images_to_delete:
         return "No unlocked images to delete.", gr.Group(visible=False)
 
@@ -421,37 +469,89 @@ def refresh_gallery_ui(lock_states, page_num=1):
     return [lock_states, page_num, page_info, gr.Button(interactive=prev_button_interactive),
             gr.Button(interactive=next_button_interactive)] + ui_updates
 
-def load_and_refresh_prompts():
+def load_and_refresh_prompts(selected_model_id = None, models_dict = None):
     """Loads prompts from file and updates the dropdown menu."""
     prompts = load_prompts()
-    default_prompt_title = list(prompts.keys())[0] if prompts else ""
-    return prompts, gr.Dropdown(choices=list(prompts.keys()), value=default_prompt_title), prompts.get(default_prompt_title, "")
+
+    if selected_model_id is not None and models_dict is not None:
+        type = models_dict.get(selected_model_id)["type"]
+        filtered_prompts = {k: v for k, v in prompts.items() if v.get("type") == type}
+    else:
+        filtered_prompts = prompts
+
+    if not filtered_prompts:
+        return {}, gr.Dropdown(choices=[], value=""), ""
+
+    default_prompt_title = next((k for k, v in filtered_prompts.items() if v.get("default")), None)
+
+    if not default_prompt_title:
+        default_prompt_title = list(filtered_prompts.keys())[0]
+
+    default_prompt_text = filtered_prompts[default_prompt_title].get("prompt", "")
+
+    return (
+        filtered_prompts,
+        gr.Dropdown(choices=list(filtered_prompts.keys()), value=default_prompt_title),
+        default_prompt_text
+    )
 
 def update_prompt_from_dropdown(selected_title, prompts_dict):
     """Updates the prompt text field from the dropdown selection."""
-    return prompts_dict.get(selected_title, "")
+    all_prompts = load_prompts()
 
-def add_new_prompt(title, content, prompts_dict, prompts=None):
+    type = prompts_dict.get(selected_title, "").get("type", None)
+
+    # persist last prompt selection
+    if type is not None:
+        for k, v in all_prompts.items():
+            if v.get("type") == type and k != selected_title:
+                v["default"] = False
+            elif v.get("type") == type and k == selected_title:
+                v["default"] = True
+        save_prompts(all_prompts)
+
+    return prompts_dict.get(selected_title, "").get("prompt", "")
+
+def add_new_prompt(title, prompt, prompts_dict, selected_model_id, models_dict):
     """Adds a new prompt, saves it, and updates the UI."""
-    if not title or not content:
-        current_selection = list(prompts_dict.keys())[0] if prompts else ""
-        return prompts_dict, gr.Dropdown(choices=list(prompts.keys()), value=current_selection)
+    if not title or not prompt:
+        current_selection = list(prompts_dict.keys())[0] if prompts_dict else ""
+        return prompts_dict, gr.Dropdown(choices=list(prompts_dict.keys()), value=current_selection)
 
-    prompts_dict[title] = content
-    save_prompts(prompts_dict)
+    all_prompts = load_prompts()
+
+    type = models_dict.get(selected_model_id)["type"]
+
+    # make the new prompt as default
+    for k, v in all_prompts.items():
+        if v.get("type") == type:
+            v["default"] = False
+
+    new_prompt_entry = {
+        "prompt": prompt,
+        "type": type,
+        "default": True
+    }
+
+    prompts_dict[title] = new_prompt_entry
+    all_prompts[title] = new_prompt_entry
+
+    save_prompts(all_prompts)
 
     return prompts_dict, gr.Dropdown(choices=list(prompts_dict.keys()), value=title)
 
-def load_model_wrapper(selected_name, models_dict):
-    model_id = models_dict.get(selected_name)
+def load_model_wrapper(selected_model_id, models_dict):
+    model_id = models_dict.get(selected_model_id)['model']
+    model_type = models_dict.get(selected_model_id)['type']
+
     if not model_id:
         yield "Erreur : Nom du modèle non trouvé dans la configuration.", False
         return
-    yield from load_model(model_id)
+    yield from load_model(model_id, model_type)
 
 # --- 4. Create the Gradio Interface ---
 
-with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH) as app:
+with (gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH) as app):
     gr.Markdown("# Caption Forge")
     gr.Markdown("Drop your images, adjust the prompt, lock captions you want to keep, then start the process.")
     gr.Markdown("images and captions are stored in ./input folder.")
@@ -488,8 +588,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
                                 info="Higher values increase creativity/randomness. 0.0 is deterministic.")
         seed_input = gr.Number(value=-1, label="Seed", precision=0,
                                info="Set a specific seed for reproducible results. -1 means random.")
-    
-    start_button = gr.Button("Generate captions for unlocked images", variant="primary", interactive=False)
+
+    start_button = gr.Button("Generate all captions", variant="primary", interactive=False)
 
     gr.Markdown("---")
     gr.Markdown("## Image Gallery & Captions")
@@ -546,13 +646,16 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
         inputs=[lock_states, current_page],
         outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
     ).then(
-    fn=load_or_create_models_config,
-    outputs=[models_state]
+        fn=load_or_create_models_config,
+        outputs=[models_state]
     ).then(
-    fn=lambda models_dict: gr.Dropdown(choices=list(models_dict.keys()), value=list(models_dict.keys())[0]),
-    inputs=[models_state],
-    outputs=[model_selector]
-)
+        fn=lambda models_dict: gr.Dropdown(
+            choices=list(models_dict.keys()),
+            value=next((name for name, data in models_dict.items() if data.get("default")), list(models_dict.keys())[0])
+        ),
+        inputs=[models_state],
+        outputs=[model_selector]
+    )
 
     app.load(
         fn=initialize_app_state,
@@ -617,6 +720,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
         inputs=[is_model_loaded_state],
         outputs=[status_output, is_model_loaded_state]
     ).then(
+        fn=persist_last_model_choice,
+        inputs=[model_selector, models_state]
+    ).then(
+        fn=load_and_refresh_prompts,
+        inputs=[model_selector, models_state],
+        outputs=[prompts_state, prompt_selector, prompt_input]
+    ).then(
         lambda loaded: gr.update(visible=not loaded),
         inputs=[is_model_loaded_state],
         outputs=load_model_button
@@ -626,10 +736,19 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
         outputs=unload_model_button
     )
 
-    prompt_selector.change(fn=update_prompt_from_dropdown, inputs=[prompt_selector, prompts_state], outputs=[prompt_input])
+    prompt_selector.change(
+        fn=update_prompt_from_dropdown,
+        inputs=[prompt_selector, prompts_state],
+        outputs=[prompt_input]
+    )
     save_prompt_button.click(
-        fn=add_new_prompt, inputs=[new_prompt_title, prompt_input, prompts_state], outputs=[prompts_state, prompt_selector]
-    ).then(lambda: gr.Textbox(value=""), outputs=new_prompt_title)
+        fn=add_new_prompt,
+        inputs=[new_prompt_title, prompt_input, prompts_state, model_selector, models_state],
+        outputs=[prompts_state, prompt_selector]
+    ).then(
+        lambda: gr.Textbox(value=""),
+        outputs=new_prompt_title
+    )
 
     prev_button.click(
         fn=lambda p: p - 1, inputs=[current_page], outputs=[current_page]
@@ -644,7 +763,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PATH
         fn=refresh_gallery_ui, inputs=[lock_states, current_page],
         outputs=[lock_states, current_page, page_indicator, prev_button, next_button] + flat_ui_outputs
     )
-    
+
     delete_all_button.click(fn=lambda: gr.Group(visible=True), outputs=[confirmation_group])
     cancel_delete_button.click(fn=lambda: gr.Group(visible=False), outputs=[confirmation_group])
     confirm_delete_button.click(
