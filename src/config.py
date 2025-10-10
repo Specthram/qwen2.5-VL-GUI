@@ -64,11 +64,21 @@ def load_prompts():
             "type": "qwen2.5",
             "default": True
         },
-        "llama - Descriptive": {
+        "Formal Descriptive": {
             "prompt": "Write a long descriptive caption for this image in a formal tone.",
             "type": "llava",
             "default": True
-        }
+        },
+        "Detailed Descriptive": {
+            "prompt": "Please provide a detailed description of the image.",
+            "type": "llava",
+            "default": False
+        },
+        "Booru tag list": {
+            "prompt": "Write a list of Booru tags for this image.",
+            "type": "llava",
+            "default": False
+        },
     }
     save_prompts(default_prompts)
     return default_prompts
@@ -77,3 +87,8 @@ def save_prompts(prompts_dict):
     """Saves the prompts dictionary to the JSON file."""
     with open(PROMPT_FILE, 'w', encoding='utf-8') as f:
         json.dump(prompts_dict, f, indent=4, ensure_ascii=False)
+
+def save_models(models_dict):
+    """Saves the models dictionary to the JSON file."""
+    with open(MODELS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(models_dict, f, indent=4, ensure_ascii=False)

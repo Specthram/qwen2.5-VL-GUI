@@ -10,11 +10,10 @@ import torch.nn.functional as F
 from functools import partial
 from PIL import Image
 from PIL.Image import Resampling
-
 from src.zip import create_zip_archive
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, Gemma3ForConditionalGeneration, \
     LlavaForConditionalGeneration
-from src.config import save_prompts, load_or_create_models_config, load_prompts
+from src.config import save_prompts, load_or_create_models_config, load_prompts, save_models
 
 # --- 1. Configuration ---
 
@@ -119,9 +118,21 @@ def on_model_change(is_loaded):
         return status, loaded_state
     return "Model selection changed. Ready to load.", False
 
+def persist_last_model_choice(selected_model_id, models_dict):
+    """Save the last model choice in conf."""
+    model_id = models_dict.get(selected_model_id)['model']
+    model_type = models_dict.get(selected_model_id)['type']
+
+    for k, v in models_dict.items():
+        if k == selected_model_id:
+            v["default"] = True
+        else:
+            v["default"] = False
+
+    save_models(models_dict)
+
 def is_model_loaded():
     return model is not None
-
 
 def get_media_files():
     """Returns a sorted list of media file paths in the 'input' directory."""
@@ -486,6 +497,19 @@ def load_and_refresh_prompts(selected_model_id = None, models_dict = None):
 
 def update_prompt_from_dropdown(selected_title, prompts_dict):
     """Updates the prompt text field from the dropdown selection."""
+    all_prompts = load_prompts()
+
+    type = prompts_dict.get(selected_title, "").get("type", None)
+
+    # persist last prompt selection
+    if type is not None:
+        for k, v in all_prompts.items():
+            if v.get("type") == type and k != selected_title:
+                v["default"] = False
+            elif v.get("type") == type and k == selected_title:
+                v["default"] = True
+        save_prompts(all_prompts)
+
     return prompts_dict.get(selected_title, "").get("prompt", "")
 
 def add_new_prompt(title, prompt, prompts_dict, selected_model_id, models_dict):
@@ -497,10 +521,16 @@ def add_new_prompt(title, prompt, prompts_dict, selected_model_id, models_dict):
     all_prompts = load_prompts()
 
     type = models_dict.get(selected_model_id)["type"]
+
+    # make the new prompt as default
+    for k, v in all_prompts.items():
+        if v.get("type") == type:
+            v["default"] = False
+
     new_prompt_entry = {
         "prompt": prompt,
         "type": type,
-        "default": False
+        "default": True
     }
 
     prompts_dict[title] = new_prompt_entry
@@ -559,7 +589,7 @@ with (gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PAT
         seed_input = gr.Number(value=-1, label="Seed", precision=0,
                                info="Set a specific seed for reproducible results. -1 means random.")
 
-    start_button = gr.Button("Generate captions for unlocked images", variant="primary", interactive=False)
+    start_button = gr.Button("Generate all captions", variant="primary", interactive=False)
 
     gr.Markdown("---")
     gr.Markdown("## Image Gallery & Captions")
@@ -690,6 +720,9 @@ with (gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PAT
         inputs=[is_model_loaded_state],
         outputs=[status_output, is_model_loaded_state]
     ).then(
+        fn=persist_last_model_choice,
+        inputs=[model_selector, models_state]
+    ).then(
         fn=load_and_refresh_prompts,
         inputs=[model_selector, models_state],
         outputs=[prompts_state, prompt_selector, prompt_input]
@@ -703,7 +736,11 @@ with (gr.Blocks(theme=gr.themes.Soft(), title="Caption Forge", css_paths=CSS_PAT
         outputs=unload_model_button
     )
 
-    prompt_selector.change(fn=update_prompt_from_dropdown, inputs=[prompt_selector, prompts_state], outputs=[prompt_input])
+    prompt_selector.change(
+        fn=update_prompt_from_dropdown,
+        inputs=[prompt_selector, prompts_state],
+        outputs=[prompt_input]
+    )
     save_prompt_button.click(
         fn=add_new_prompt,
         inputs=[new_prompt_title, prompt_input, prompts_state, model_selector, models_state],
